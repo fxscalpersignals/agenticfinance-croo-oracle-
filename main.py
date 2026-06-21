@@ -22,7 +22,7 @@ import uvicorn
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.getenv("CHAT_ID")
 CAP_API_KEY = os.getenv("CAP_API_KEY")
-WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") # Render sets this automatically
+WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 if ADMIN_CHAT_ID:
     try:
@@ -142,7 +142,7 @@ async def get_price_mexc(session, coin):
 
 async def get_price_coingecko(session, coin):
     try:
-        cg_id = COIN_NAMES[coin] # FIXED: was COIN_NAMES
+        cg_id = COIN_NAMES # FIXED
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true"
         async with session.get(url, timeout=3) as r:
             if r.status == 200:
