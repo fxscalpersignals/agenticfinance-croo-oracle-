@@ -10,19 +10,19 @@ import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
-import threading
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.getenv("CHAT_ID")
 CAP_API_KEY = os.getenv("CAP_API_KEY")
+WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") # Render sets this automatically
 
 if ADMIN_CHAT_ID:
     try:
@@ -100,13 +100,6 @@ async def get_session(app):
         app.bot_data["session"] = aiohttp.ClientSession(timeout=TIMEOUT, connector=connector)
     return app.bot_data["session"]
 
-async def post_shutdown(app):
-    session = app.bot_data.get("session")
-    if session and not session.closed:
-        await session.close()
-    save_portfolio()
-    logging.info("✅ Graceful shutdown completed.")
-
 async def fetch_with_retry(session, url, max_retries=2):
     for attempt in range(max_retries + 1):
         try:
@@ -149,7 +142,7 @@ async def get_price_mexc(session, coin):
 
 async def get_price_coingecko(session, coin):
     try:
-        cg_id = COIN_NAMES[coin]
+        cg_id = COIN_NAMES[coin] # FIXED: was COIN_NAMES
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true"
         async with session.get(url, timeout=3) as r:
             if r.status == 200:
@@ -506,7 +499,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# ================= FASTAPI CAP ENDPOINT =================
+# ================= FASTAPI APP =================
 app_api = FastAPI(title="Agentic Finance Alpha Oracle - CROO", version="3.0")
 
 app_api.add_middleware(
@@ -586,7 +579,9 @@ async def get_signal_api(req: SignalRequest, request: Request):
             "timestamp": datetime.now().isoformat()
         }
 
-# ================= TELEGRAM COMMANDS =================
+# ================= TELEGRAM SETUP =================
+telegram_app = Application.builder().token(TOKEN).build()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 **Agentic Finance Studio - CROO Edition**\n\n"
@@ -598,36 +593,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
-def run_fastapi():
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app_api, host="0.0.0.0", port=port, log_level="error")
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CallbackQueryHandler(button_handler))
 
-def main():
-    if not TOKEN:
-        logging.error("❌ TELEGRAM_TOKEN not set!")
-        return
+@app_api.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"ok": True}
 
-    threading.Thread(target=run_fastapi, daemon=True).start()
+@app_api.on_event("startup")
+async def startup_event():
+    await telegram_app.initialize()
+    if WEBHOOK_URL:
+        webhook_url = f"{WEBHOOK_URL}/webhook"
+        await telegram_app.bot.set_webhook(url=webhook_url)
+        logging.info(f"✅ Webhook set to {webhook_url}")
+    await get_session(telegram_app)
+    asyncio.create_task(market_scanner(telegram_app))
     logging.info("✅ CAP API started - /get_signal ready for CROO")
+    logging.info("✅ CROO Production Version Loaded - CAP + 3-tier + Whale + Sectors + Security")
 
-    async def _internal_post_init(app):
-        await get_session(app)
-        app.bot_data["scanner_task"] = asyncio.create_task(market_scanner(app))
-        logging.info("✅ CROO Production Version Loaded - CAP + 3-tier + Whale + Sectors + Security")
-
-    application = (
-        ApplicationBuilder()
- .token(TOKEN)
- .post_init(_internal_post_init)
- .post_shutdown(post_shutdown)
- .build()
-    )
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-
-    logging.info("🚀 Agentic Finance Studio is running...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+@app_api.on_event("shutdown")
+async def shutdown_event():
+    session = telegram_app.bot_data.get("session")
+    if session and not session.closed:
+        await session.close()
+    save_portfolio()
+    logging.info("✅ Graceful shutdown completed.")
 
 if __name__ == "__main__":
-    main()
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run(app_api, host="0.0.0.0", port=port)
