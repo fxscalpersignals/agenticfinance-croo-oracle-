@@ -90,6 +90,8 @@ def calc_rsi(closes, period=14):
     return rsi
 
 def calc_ema(closes, period):
+    if len(closes) < period:
+        return np.array([])
     return np.convolve(closes, np.ones(period)/period, mode='valid')
 
 def analyze_asset(symbol, timeframe="1h"):
@@ -109,12 +111,14 @@ def analyze_asset(symbol, timeframe="1h"):
     price = closes[-1]
     
     rsi = calc_rsi(closes)[-1]
-    ema20 = calc_ema(closes, 20)[-1]
-    ema50 = calc_ema(closes, 50)[-1]
+    ema20_arr = calc_ema(closes, 20)
+    ema50_arr = calc_ema(closes, 50)
+    ema20 = ema20_arr[-1] if len(ema20_arr) > 0 else price
+    ema50 = ema50_arr[-1] if len(ema50_arr) > 0 else price
     
     # Pullback % from recent high
     recent_high = max(closes[-20:])
-    pullback = (recent_high - price) / recent_high * 100
+    pullback = (recent_high - price) / recent_high * 100 if recent_high > 0 else 0
     
     # Volume spike
     avg_vol = np.mean(volumes[-20:])
@@ -160,6 +164,8 @@ def analyze_asset(symbol, timeframe="1h"):
     }
 
 def run_scanner():
+    global signal_history
+    
     results = {}
     for asset in ASSETS:
         data = analyze_asset(asset, "1h")
@@ -176,7 +182,6 @@ def run_scanner():
                 signal_history.append(data)
     
     # Keep only last 50
-    global signal_history
     signal_history = signal_history[-50:]
     
     cache["signals"] = results
@@ -192,8 +197,8 @@ async def send_auto_alert(asset, data):
     msg += f"Reasons: {', '.join(data['reasons'])}"
     try:
         await bot.send_message(chat_id=CHAT_ID, text=msg)
-    except:
-        pass
+    except Exception as e:
+        print(f"Alert failed: {e}")
 
 # ===== ROUTES =====
 @app.on_event("startup")
