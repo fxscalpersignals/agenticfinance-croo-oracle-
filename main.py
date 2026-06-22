@@ -104,24 +104,8 @@ def fetch_coinbase_candles(asset):
         print(f"Coinbase ERR {asset}: {e}")
     return None, None
 
-def fetch_cryptocompare(asset):
-    cc_map = {"BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL", "XRPUSDT": "XRP",
-              "CROUSDT": "CRO", "LINKUSDT": "LINK", "AVAXUSDT": "AVAX", "SUIUSDT": "SUI",
-              "ATOMUSDT": "ATOM", "BNBUSDT": "BNB"}
-    try:
-        sym = cc_map[asset]
-        url = "https://min-api.cryptocompare.com/data/v2/histohour"
-        r = requests.get(url, params={"fsym": sym, "tsym": "USD", "limit": 100}, timeout=10)
-        if r.status_code == 200:
-            data = r.json()["Data"]["Data"]
-            klines = [[d["time"]*1000, d["open"], d["high"], d["low"], d["close"], d["volumeto"]] for d in data]
-            return klines, "CryptoCompare"
-    except Exception as e:
-        print(f"CryptoCompare ERR {asset}: {e}")
-    return None, None
-
 def get_ohlcv(asset):
-    for func in [fetch_coingecko_ohlcv, fetch_kraken_ohlc, fetch_coinbase_candles, fetch_cryptocompare]:
+    for func in [fetch_coingecko_ohlcv, fetch_kraken_ohlc, fetch_coinbase_candles]:
         klines, source = func(asset)
         if klines:
             print(f"{source} OK: {asset}")
@@ -230,7 +214,6 @@ def analyze_asset(symbol):
     bullish_confirmation = price > prev_close
     bearish_confirmation = price < prev_close
 
-    # NEW STRICT SCORING - 20 pts each
     long_score = 0
     short_score = 0
     bullish_reasons = []
@@ -254,14 +237,14 @@ def analyze_asset(symbol):
     else:
         missing_conditions.append("No clear EMA trend")
 
-    # 3. Pullback + Support: 20 pts - FIXED 4-12% RANGE
+    # 3. Pullback + Support: 20 pts - STRICT 4-12%
     if 4 < pullback < 12 and price_near_ema20:
         long_score += 20
         bullish_reasons.append(f"Meaningful Dip {pullback:.1f}% to EMA20")
     elif 4 < bounce < 12 and price_near_ema20:
         short_score += 20
     else:
-        missing_conditions.append("Pullback too shallow or deep, or not at EMA20")
+        missing_conditions.append("Pullback too shallow/deep or not at EMA20")
 
     # 4. Volume Spike: 20 pts
     if vol_spike:
@@ -293,7 +276,7 @@ def analyze_asset(symbol):
     direction = "LONG" if long_score >= short_score else "SHORT"
     confidence = max(long_score, short_score)
 
-    # NEW THRESHOLDS: BUY >= 80, WATCH 60-79, NONE < 60
+    # STRICT THRESHOLDS: BUY >= 80, WATCH 60-79, NONE < 60
     signal = "NONE"
     if confidence >= 80: signal = "BUY" if direction == "LONG" else "SHORT"
     elif confidence >= 60: signal = "WATCH"
@@ -672,4 +655,8 @@ def demo():
 @app.get("/cap/metadata")
 def cap_metadata():
     return {"agent": "CROO AI Oracle", "version": "10.1", "category": "Market Intelligence",
-            "callable": True, "supports": ["BTC", "ETH", "
+            "callable": True, "supports": ["BTC", "ETH", "SOL", "XRP", "CRO", "LINK", "AVAX", "SUI", "ATOM", "BNB"]}
+
+@app.get("/pricing")
+def pricing():
+    return {"free": "5 requests/day", "pro": "Unlimited", "enterprise
