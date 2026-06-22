@@ -22,14 +22,21 @@ PAYMENT_PROVIDER_TOKEN = ""
 bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 start_time = time.time()
 
-ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "CROUSDT"]
+ASSETS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "CROUSDT",
+    "LINKUSDT", "AVAXUSDT", "SUIUSDT", "ATOMUSDT", "BNBUSDT"
+]
+
 CG_MAP = {
     "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
-    "XRPUSDT": "ripple", "CROUSDT": "crypto-com-chain"
+    "XRPUSDT": "ripple", "CROUSDT": "crypto-com-chain", "LINKUSDT": "chainlink",
+    "AVAXUSDT": "avalanche-2", "SUIUSDT": "sui", "ATOMUSDT": "cosmos", "BNBUSDT": "binancecoin"
 }
+
 KRAKEN_MAP = {
     "BTCUSDT": "XBTUSD", "ETHUSDT": "ETHUSD", "SOLUSDT": "SOLUSD",
-    "XRPUSDT": "XRPUSD", "CROUSDT": None # Kraken doesn't have CRO
+    "XRPUSDT": "XRPUSD", "LINKUSDT": "LINKUSD", "AVAXUSDT": "AVAXUSD",
+    "ATOMUSDT": "ATOMUSD", "BNBUSDT": "BNBUSD", "CROUSDT": None, "SUIUSDT": None
 }
 
 # ==================== STATE ====================
@@ -44,68 +51,62 @@ agent_memory = {
 }
 
 # ==================== DATA SOURCES ====================
-def fetch_coingecko_ohlcv(asset, days=1):
-    """Primary: CoinGecko Market Chart - OHLCV for RSI/EMA/Volume"""
+def fetch_coingecko_ohlcv(asset, days=4):
     try:
         coin_id = CG_MAP[asset]
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
         r = requests.get(url, params={"vs_currency": "usd", "days": days, "interval": "hourly"}, timeout=10)
         if r.status_code == 200:
             data = r.json()
-            prices = data["prices"] # [timestamp, price]
-            volumes = data["total_volumes"] # [timestamp, volume]
+            prices = data["prices"]
+            volumes = data["total_volumes"]
             klines = []
             for i in range(len(prices)):
                 ts = prices[i][0]
                 close = prices[i][1]
                 vol = volumes[i][1] if i < len(volumes) else 0
-                klines.append([ts, close, close, close, close, vol]) # O=H=L=C for hourly
-            print(f"CoinGecko OK: {asset} {days}d")
+                klines.append([ts, close, close, vol])
             return klines[-100:], "CoinGecko"
     except Exception as e:
         print(f"CoinGecko ERR {asset}: {e}")
     return None, None
 
 def fetch_kraken_ohlc(asset):
-    """Fallback 1: Kraken - Very reliable from Render"""
     try:
         pair = KRAKEN_MAP.get(asset)
         if not pair: return None, None
         url = "https://api.kraken.com/0/public/OHLC"
-        r = requests.get(url, params={"pair": pair, "interval": 60}, timeout=10) # 1h
+        r = requests.get(url, params={"pair": pair, "interval": 60}, timeout=10)
         if r.status_code == 200:
             data = r.json()
-            if "error" in data and data["error"]:
-                print(f"Kraken FAIL {asset}: {data['error']}")
-                return None, None
+            if "error" in data and data["error"]: return None, None
             result_key = list(data["result"].keys())[0]
-            klines = data["result"][result_key]
-            print(f"Kraken OK: {asset}")
-            return klines[-100:], "Kraken"
+            return data["result"][result_key][-100:], "Kraken"
     except Exception as e:
         print(f"Kraken ERR {asset}: {e}")
     return None, None
 
 def fetch_coinbase_candles(asset):
-    """Fallback 2: Coinbase - Stable"""
-    cb_map = {"BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD", "SOLUSDT": "SOL-USD", "XRPUSDT": "XRP-USD"}
+    cb_map = {"BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD", "SOLUSDT": "SOL-USD",
+              "XRPUSDT": "XRP-USD", "LINKUSDT": "LINK-USD", "AVAXUSDT": "AVAX-USD",
+              "ATOMUSDT": "ATOM-USD", "BNBUSDT": "BNB-USD"}
     try:
         product = cb_map.get(asset)
         if not product: return None, None
         url = f"https://api.exchange.coinbase.com/products/{product}/candles"
-        r = requests.get(url, params={"granularity": 3600}, timeout=10) # 1h
+        r = requests.get(url, params={"granularity": 3600}, timeout=10)
         if r.status_code == 200:
             klines = r.json()
-            klines.reverse() # Coinbase returns newest first
-            print(f"Coinbase OK: {asset}")
+            klines.reverse()
             return klines[-100:], "Coinbase"
     except Exception as e:
         print(f"Coinbase ERR {asset}: {e}")
     return None, None
 
 def fetch_cryptocompare(asset):
-    """Fallback 3: CryptoCompare"""
-    cc_map = {"BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL", "XRPUSDT": "XRP", "CROUSDT": "CRO"}
+    cc_map = {"BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL", "XRPUSDT": "XRP",
+              "CROUSDT": "CRO", "LINKUSDT": "LINK", "AVAXUSDT": "AVAX", "SUIUSDT": "SUI",
+              "ATOMUSDT": "ATOM", "BNBUSDT": "BNB"}
     try:
         sym = cc_map[asset]
         url = "https://min-api.cryptocompare.com/data/v2/histohour"
@@ -113,23 +114,15 @@ def fetch_cryptocompare(asset):
         if r.status_code == 200:
             data = r.json()["Data"]["Data"]
             klines = [[d["time"]*1000, d["open"], d["high"], d["low"], d["close"], d["volumeto"]] for d in data]
-            print(f"CryptoCompare OK: {asset}")
             return klines, "CryptoCompare"
     except Exception as e:
         print(f"CryptoCompare ERR {asset}: {e}")
     return None, None
 
 def get_ohlcv(asset):
-    """Try CoinGecko -> Kraken -> Coinbase -> CryptoCompare"""
-    klines, source = fetch_coingecko_ohlcv(asset, days=4) # 4 days for 4h data
-    if klines: return klines, source
-    klines, source = fetch_kraken_ohlc(asset)
-    if klines: return klines, source
-    klines, source = fetch_coinbase_candles(asset)
-    if klines: return klines, source
-    klines, source = fetch_cryptocompare(asset)
-    if klines: return klines, source
-    print(f"ALL SOURCES FAILED: {asset}")
+    for func in [fetch_coingecko_ohlcv, fetch_kraken_ohlc, fetch_coinbase_candles, fetch_cryptocompare]:
+        klines, source = func(asset)
+        if klines: return klines, source
     return None, "none"
 
 def get_current_price(asset):
@@ -147,8 +140,7 @@ def fetch_fear_greed():
             val = int(r.json()["data"][0]["value"])
             cache["fear_greed"] = val
             return val
-    except Exception as e:
-        print(f"F&G ERR: {e}")
+    except: pass
     return 50
 
 # ==================== INDICATORS ====================
@@ -210,14 +202,15 @@ def analyze_asset(symbol):
         if price > 0:
             return {
                 "asset": symbol.replace("USDT", ""), "signal": "WATCH", "confidence": 20,
-                "grade": "D", "price": round(price, 4), "entry": round(price, 4),
-                "reasons": ["Price only - OHLCV unavailable"], "source": "price_only"
+                "grade": "D", "price": round(price, 4), "entry": 0, "stop_loss": 0, "take_profit": 0,
+                "reasons": ["Price only - OHLCV unavailable"], "missing": ["Full OHLCV data"], "source": "price_only"
             }
         return {"asset": symbol.replace("USDT", ""), "signal": "NONE", "confidence": 0, "price": 0, "reasons": ["No Data"]}
 
     closes = np.array([float(k[4]) for k in klines])
     volumes = np.array([float(k[5]) for k in klines])
     price = closes[-1]
+    prev_close = closes[-2] if len(closes) > 1 else price
     rsi_val = calc_rsi(closes)[-1]
     ema20 = calc_ema(closes, 20)[-1] if len(calc_ema(closes, 20)) > 0 else price
     ema50 = calc_ema(closes, 50)[-1] if len(calc_ema(closes, 50)) > 0 else price
@@ -228,52 +221,84 @@ def analyze_asset(symbol):
     bounce = (price - recent_low) / recent_low * 100 if recent_low > 0 else 0
     avg_vol = np.mean(volumes[-20:])
     vol_spike = volumes[-1] > avg_vol * 1.5 if avg_vol > 0 else False
-
-    long_score = 0
-    if rsi_val < 45: long_score += 30
-    if price > ema50: long_score += 25
-    if 2 < pullback < 12: long_score += 25
-    if vol_spike: long_score += 20
-
-    short_score = 0
-    if rsi_val > 55: short_score += 25
-    if price < ema50: short_score += 25
-    if 2 < bounce < 12: short_score += 20
-    rally = ((ema20 - price) / price * 100) if price < ema20 else 0
-    if 0 < rally < 3: short_score += 15
-    if vol_spike: short_score += 15
-
-    fg = cache["fear_greed"]
-    if fg < 25 and long_score > 0: long_score += 10
-    if fg > 75 and short_score > 0: short_score += 10
-
-    confidence = max(long_score, short_score)
-    direction = "LONG" if long_score >= short_score else "SHORT"
+    price_near_ema20 = abs(price - ema20) / ema20 * 100 < 1.5
+    bullish_confirmation = price > prev_close
 
     reasons = []
-    if rsi_val < 45 and direction == "LONG": reasons.append("✅ RSI Oversold")
-    if rsi_val > 55 and direction == "SHORT": reasons.append("✅ RSI Overbought")
-    if price > ema50 and direction == "LONG": reasons.append("✅ Above EMA50")
-    if price < ema50 and direction == "SHORT": reasons.append("✅ Below EMA50")
-    if 2 < pullback < 12 and direction == "LONG": reasons.append(f"✅ Dip {pullback:.1f}%")
-    if 2 < bounce < 12 and direction == "SHORT": reasons.append(f"✅ Bounce {bounce:.1f}%")
-    if vol_spike: reasons.append("✅ Volume Spike")
-    if not reasons: reasons = ["Waiting for setup"]
+    missing = []
+    score = 0
+
+    # LONG logic
+    if rsi_val < 45:
+        reasons.append("✅ RSI Oversold"); score += 20
+    else:
+        missing.append("RSI not oversold")
+
+    if price > ema50:
+        reasons.append("✅ Above EMA50"); score += 20
+    else:
+        missing.append("Price below EMA50")
+
+    if 4 < pullback < 12:
+        reasons.append(f"✅ Meaningful Dip {pullback:.1f}%"); score += 20
+    else:
+        missing.append("Pullback too shallow or too deep")
+
+    if vol_spike:
+        reasons.append("✅ Volume Spike"); score += 20
+    else:
+        missing.append("No volume confirmation")
+
+    if bullish_confirmation:
+        reasons.append("✅ Bullish Confirmation Candle"); score += 20
+    else:
+        missing.append("No bullish candle close")
+
+    if price_near_ema20:
+        reasons.append("✅ Near EMA20 Support")
+        score += 10
+    else:
+        missing.append("Price not at EMA20 support")
+
+    fg = cache["fear_greed"]
+    if fg < 25: reasons.append("✅ Extreme Fear"); score += 10
+    if fg > 75: missing.append("Market too greedy")
+
+    # SHORT logic
+    short_score = 0
+    if rsi_val > 55: short_score += 20
+    if price < ema50: short_score += 20
+    if 4 < bounce < 12: short_score += 20
+    if vol_spike: short_score += 20
+    if not bullish_confirmation: short_score += 20
+
+    direction = "LONG" if score >= short_score else "SHORT"
+    confidence = score if direction == "LONG" else short_score
 
     signal = "NONE"
-    if confidence >= 75: signal = "BUY" if direction == "LONG" else "SHORT"
-    elif confidence >= 20: signal = "WATCH"
+    if confidence >= 80: signal = "BUY" if direction == "LONG" else "SHORT"
+    elif confidence >= 60: signal = "WATCH"
 
-    stop_loss = round(price * 0.95, 4) if signal == "BUY" else round(price * 1.05, 4) if signal == "SHORT" else 0
-    take_profit = round(price * 1.10, 4) if signal == "BUY" else round(price * 0.90, 4) if signal == "SHORT" else 0
+    if signal == "BUY":
+        stop_loss = round(price * 0.95, 4)
+        take_profit = round(price * 1.10, 4)
+        entry = round(price, 4)
+    elif signal == "SHORT":
+        stop_loss = round(price * 1.05, 4)
+        take_profit = round(price * 0.90, 4)
+        entry = round(price, 4)
+    else:
+        stop_loss = 0
+        take_profit = 0
+        entry = 0
 
     return {
         "asset": symbol.replace("USDT", ""), "price": round(price, 4), "signal": signal,
         "confidence": confidence, "grade": grade(confidence), "direction": direction,
-        "entry": round(price, 4), "stop_loss": stop_loss, "take_profit": take_profit,
-        "rsi": round(rsi_val, 1), "reasons": reasons, "source": source,
-        "market_regime": cache["market_regime"], "fear_greed": cache["fear_greed"],
-        "timestamp": datetime.utcnow().isoformat()
+        "entry": entry, "stop_loss": stop_loss, "take_profit": take_profit,
+        "rsi": round(rsi_val, 1), "reasons": reasons, "missing": missing,
+        "source": source, "market_regime": cache["market_regime"],
+        "fear_greed": cache["fear_greed"], "timestamp": datetime.utcnow().isoformat()
     }
 
 def update_performance():
@@ -317,7 +342,7 @@ def update_memory():
     agent_memory["best_asset_win_rate"] = round(best_rate * 100, 1)
 
 async def send_alert(signal):
-    if not bot or signal["confidence"] < 75: return
+    if not bot or signal["confidence"] < 80: return
     if signal["asset"] in last_alerted and time.time() - last_alerted[signal["asset"]] < 3600: return
     msg = f"🚨 NEW {signal['signal']} SIGNAL\n\n"
     msg += f"Asset: {signal['asset']}\nConfidence: {signal['confidence']}% ({signal['grade']})\n\n"
@@ -330,7 +355,6 @@ async def send_alert(signal):
     last_alerted[signal["asset"]] = time.time()
 
 def scan_all():
-    print("Starting scan...")
     fetch_fear_greed()
     update_performance()
     cache["market_regime"] = detect_regime()
@@ -390,8 +414,8 @@ async def handle_message(chat_id, text, user_id):
             [InlineKeyboardButton("📈 BTC", callback_data="BTCUSDT"),
              InlineKeyboardButton("📈 ETH", callback_data="ETHUSDT"),
              InlineKeyboardButton("📈 SOL", callback_data="SOLUSDT")],
-            [InlineKeyboardButton("📈 XRP", callback_data="XRPUSDT"),
-             InlineKeyboardButton("📈 CRO", callback_data="CROUSDT")],
+            [InlineKeyboardButton("📈 BNB", callback_data="BNBUSDT"),
+             InlineKeyboardButton("📈 LINK", callback_data="LINKUSDT")],
             [InlineKeyboardButton("💎 Upgrade", callback_data="buy_cmd")]
         ]
         regime = cache["market_regime"].upper()
@@ -401,10 +425,10 @@ async def handle_message(chat_id, text, user_id):
         msg = "🔮 CROO AI Oracle - Market Intelligence\n\n"
         msg += f"Market Regime: {regime} | F&G: {cache['fear_greed']}\n"
         msg += "Autonomous scanning every 5 min\n"
-        msg += "Assets: BTC, ETH, SOL, XRP, CRO\n"
+        msg += "Assets: BTC, ETH, SOL, XRP, CRO, LINK, AVAX, SUI, ATOM, BNB\n"
         if top and top["confidence"] > 0:
             msg += f"🔥 TOP: {top['asset']} {top['signal']} {top['confidence']}% ({top['grade']})\n"
-            msg += f"Price: ${top['price']} | Source: {top['source']}\n\n"
+            msg += f"Price: ${top['price']} | Source: {top.get('source', 'N/A')}\n\n"
         msg += "Demo: All features FREE for judges\n\n"
         msg += "/scan /best /leaderboard /stats /buy /sell"
         await bot.send_message(chat_id=chat_id, text=msg, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -423,12 +447,20 @@ async def handle_message(chat_id, text, user_id):
     elif text == "/sell": await handle_sell(chat_id, user_id)
 
 async def send_rich_card(chat_id, s):
-    msg = f"🚨 {s['signal']} SIGNAL\n\n"
-    msg += f"Asset: {s['asset']}\nConfidence: {s['confidence']}% ({s['grade']})\nPrice: ${s['price']}\n\n"
-    if s['entry'] > 0:
+    if s['signal'] == "WATCH":
+        msg = f"⚠️ WATCH SIGNAL\n\n"
+        msg += f"Asset: {s['asset']}\nConfidence: {s['confidence']}% ({s['grade']})\nPrice: ${s['price']}\n\n"
+        msg += f"Entry Zone: Wait\nTarget: Pending\nStop: Pending\n\n"
+    else:
+        msg = f"🚨 {s['signal']} SIGNAL\n\n"
+        msg += f"Asset: {s['asset']}\nConfidence: {s['confidence']}% ({s['grade']})\nPrice: ${s['price']}\n\n"
         msg += f"Entry:\n{s['entry']}\n\nTarget:\n{s['take_profit']}\n\nStop:\n{s['stop_loss']}\n\n"
-    msg += f"Reasons:\n" + "\n".join(s['reasons'])
-    msg += f"\n\nMarket: {s['market_regime'].upper()} | F&G: {s['fear_greed']} | Source: {s['source']}"
+
+    msg += f"Bullish Reasons:\n" + "\n".join(s.get('reasons', ['None']))
+    if s.get('missing'):
+        msg += f"\n\nMissing Conditions:\n" + "\n".join([f"❌ {m}" for m in s['missing']])
+    msg += f"\n\nNeed 80% confidence for BUY\nCurrent: {s['confidence']}%"
+    msg += f"\nMarket: {s['market_regime'].upper()} | F&G: {s['fear_greed']} | Source: {s.get('source', 'N/A')}"
     await bot.send_message(chat_id=chat_id, text=msg)
 
 async def send_leaderboard(chat_id):
@@ -436,8 +468,8 @@ async def send_leaderboard(chat_id):
     signals = sorted(cache["signals"].values(), key=lambda x: x["confidence"], reverse=True)
     msg = f"🏆 LEADERBOARD | {cache['market_regime'].upper()} | F&G: {cache['fear_greed']}\n\n"
     for i, s in enumerate(signals[:5], 1):
-        msg += f"{i}. {s['asset']} - {s['confidence']}% ({s['grade']}) {s['signal']}\n"
-        msg += f" ${s['price']} | {s['source']}\n"
+        msg += f"{i}. {s.get('asset','N/A')} - {s.get('confidence',0)}% ({s.get('grade','N/A')}) {s.get('signal','NONE')}\n"
+        msg += f" ${s.get('price',0)} | {s.get('source','N/A')}\n"
     await bot.send_message(chat_id=chat_id, text=msg)
 
 async def send_stats(chat_id):
@@ -490,7 +522,7 @@ async def handle_callback(chat_id, data, user_id):
 # ==================== API ENDPOINTS ====================
 @app.get("/")
 def root():
-    return {"status": "CROO AI Oracle Online", "mode": "hackathon", "payments": PAYMENTS_ENABLED, "version": "10.0"}
+    return {"status": "CROO AI Oracle Online", "mode": "hackathon", "payments": PAYMENTS_ENABLED, "version": "10.1"}
 
 @app.get("/health")
 def health():
@@ -508,14 +540,14 @@ def best_signal():
     if not signals: return {"asset": "NONE", "signal": "NONE", "confidence": 0}
     best = max(signals, key=lambda x: x["confidence"])
     return {"asset": best["asset"], "signal": best["signal"], "confidence": best["confidence"],
-            "grade": best["grade"], "entry": best["entry"], "price": best["price"], "source": best["source"]}
+            "grade": best["grade"], "entry": best["entry"], "price": best["price"], "source": best.get("source")}
 
 @app.get("/leaderboard")
 def leaderboard():
     scan_all()
     signals = sorted(cache["signals"].values(), key=lambda x: x["confidence"], reverse=True)
     return [{"asset": s["asset"], "confidence": s["confidence"], "grade": s["grade"],
-             "signal": s["signal"], "price": s["price"], "source": s["source"]} for s in signals]
+             "signal": s["signal"], "price": s["price"], "source": s.get("source")} for s in signals]
 
 @app.get("/performance")
 def get_performance():
@@ -545,7 +577,7 @@ def agent_manifest():
     return {
         "name": "CROO AI Oracle",
         "description": "Autonomous crypto intelligence agent",
-        "version": "10.0",
+        "version": "10.1",
         "endpoint": "/agent/query",
         "capabilities": ["pullback_detection", "market_intelligence", "signal_ranking", "regime_detection", "explainability"]
     }
@@ -558,9 +590,9 @@ def explain(symbol: str):
     if not signal: return {"error": "No signal found", "symbol": symbol}
     return {
         "asset": signal["asset"], "signal": signal["signal"], "confidence": signal["confidence"],
-        "grade": signal["grade"], "reasons": signal["reasons"], "market_regime": signal["market_regime"],
-        "fear_greed": signal["fear_greed"], "price": signal["price"], "rsi": signal["rsi"],
-        "source": signal["source"]
+        "grade": signal["grade"], "reasons": signal["reasons"], "missing": signal.get("missing", []),
+        "market_regime": signal["market_regime"], "fear_greed": signal["fear_greed"],
+        "price": signal["price"], "rsi": signal["rsi"], "source": signal.get("source")
     }
 
 @app.get("/agent/revenue")
@@ -599,13 +631,13 @@ def demo():
         "best_signal": best["asset"], "confidence": best["confidence"], "grade": best["grade"],
         "entry": best["entry"], "tp": best["take_profit"], "sl": best["stop_loss"],
         "market_regime": best["market_regime"], "fear_greed": best["fear_greed"],
-        "signal": best["signal"], "source": best["source"]
+        "signal": best["signal"], "source": best.get("source")
     }
 
 @app.get("/cap/metadata")
 def cap_metadata():
-    return {"agent": "CROO AI Oracle", "version": "10.0", "category": "Market Intelligence",
-            "callable": True, "supports": ["BTC", "ETH", "SOL", "XRP", "CRO"]}
+    return {"agent": "CROO AI Oracle", "version": "10.1", "category": "Market Intelligence",
+            "callable": True, "supports": ["BTC", "ETH", "SOL", "XRP", "CRO", "LINK", "AVAX", "SUI", "ATOM", "BNB"]}
 
 @app.get("/pricing")
 def pricing():
@@ -622,4 +654,4 @@ def cap_health():
     return {"agent": "CROO AI Oracle", "status": "active", "assets": ASSETS,
             "data_sources": ["CoinGecko", "Kraken", "Coinbase", "CryptoCompare", "Alternative.me"],
             "uptime_seconds": int(time.time() - start_time),
-            "market_regime": cache["market_regime"], "fear_greed": cache["fear_greed"], "version": "10.0"}
+            "market_regime": cache["market_regime"], "fear_greed": cache["fear_greed"], "version": "10.1"}
