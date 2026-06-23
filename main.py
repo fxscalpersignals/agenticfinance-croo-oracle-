@@ -196,7 +196,7 @@ def analyze_asset(symbol):
         if price > 0:
             return {
                 "asset": symbol.replace("USDT", ""), "signal": "WATCH", "confidence": 20,
-                "grade": "D", "price": round(price, 4), "entry": round(price, 4),
+                "grade": "F", "price": round(price, 4), "entry": round(price, 4),
                 "stop_loss": round(price * 0.97, 4), "take_profit": round(price * 1.05, 4),
                 "bullish_reasons": ["Price only"], "bearish_reasons": [],
                 "missing_conditions": ["Full OHLCV data unavailable"], "source": "price_only", "direction": "NONE"
@@ -464,7 +464,7 @@ async def handle_message(chat_id, text, user_id):
         signals = sorted(cache["signals"].values(), key=lambda x: x.get("confidence", 0), reverse=True)
         top = signals[0] if signals else None
 
-        msg = "🔮 CROO AI Oracle\n\n"
+        msg = "🔮 CROO AI Oracle\n"
         msg += f"Market: {regime} | F&G: {cache['fear_greed']}\n"
         msg += f"Assets: {len(ASSETS)} monitored\n"
         if top and top.get("confidence", 0) > 0:
@@ -659,4 +659,26 @@ def stats():
 
 @app.get("/reputation")
 def reputation():
-    score = min(
+    score = min(100, performance["wins"] * 2)
+    return {"reputation_score": score, "grade": grade(score)}
+
+@app.get("/agent/memory")
+def get_memory():
+    return agent_memory
+
+@app.get("/demo")
+def demo():
+    scan_all()
+    signals = [s for s in cache["signals"].values() if s.get("confidence", 0) > 0]
+    if not signals: return {"error": "No signals"}
+    best = max(signals, key=lambda x: x.get("confidence", 0))
+    return {
+        "best_signal": best.get("asset"), "confidence": best.get("confidence"), "grade": best.get("grade"),
+        "entry": best.get("entry"), "tp": best.get("take_profit"), "sl": best.get("stop_loss"),
+        "market_regime": best.get("market_regime"), "fear_greed": best.get("fear_greed"),
+        "signal": best.get("signal"), "source": best.get("source")
+    }
+
+@app.get("/cap/metadata")
+def cap_metadata():
+    return {"agent": "CRO
