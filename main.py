@@ -112,9 +112,9 @@ def load_memory():
                     "revenue_simulated": 0.0
                 })
                 cache["last_known_prices"] = data.get("last_prices", {})
-                print("✅ Memory loaded from disk")
+                print("Memory loaded from disk")
     except Exception as e:
-        print(f"⚠️ Memory load failed: {e}")
+        print(f"Memory load failed: {e}")
 
 def save_memory():
     try:
@@ -127,20 +127,17 @@ def save_memory():
                 "timestamp": datetime.utcnow().isoformat()
             }, f)
     except Exception as e:
-        print(f"⚠️ Memory save failed: {e}")
+        print(f"Memory save failed: {e}")
 
 # ==================== HELPERS ====================
 def normalize_symbol(symbol: str) -> str:
-    """Ensure symbol is uppercase and matches ASSETS format."""
     sym = symbol.upper()
     if not sym.endswith("USDT") and "USDT" not in sym:
-        # If it's a known crypto symbol (e.g., XBT for BTC), map it
         known = {"XBT": "BTCUSDT", "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
                  "XRP": "XRPUSDT", "BNB": "BNBUSDT", "AVAX": "AVAXUSDT", "DOGE": "DOGEUSDT",
                  "TRX": "TRXUSDT", "ADA": "ADAUSDT", "LINK": "LINKUSDT"}
         if sym in known:
             return known[sym]
-        # otherwise, just append USDT
         return sym + "USDT"
     return sym
 
@@ -177,7 +174,7 @@ def mark_success(name):
         api_failures[name] = (0, time.time() + 600)
     provider_status[name] = "active"
 
-# ==================== TELEGRAM QUEUE ====================
+# ==================== TELEGRAM QUEUE (FIXED - NO HTML) ====================
 async def telegram_worker():
     while not shutdown_event.is_set():
         try:
@@ -195,11 +192,11 @@ async def telegram_worker():
             print(f"Telegram worker error: {e}")
             await asyncio.sleep(1)
 
-async def send_telegram_message(chat_id, text, parse_mode="HTML", reply_markup=None):
+async def send_telegram_message(chat_id, text, reply_markup=None):
+    """Send plain text message (no HTML parsing)"""
     await telegram_queue.put({
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": parse_mode,
         "reply_markup": reply_markup
     })
 
@@ -234,7 +231,6 @@ def parse_okx(data):
 def parse_kraken(data):
     if isinstance(data, list) and len(data) > 2 and isinstance(data[1], list):
         pair = data[3].replace("/", "")
-        # Use reverse mapping
         for k, v in KRAKEN_WS_MAP.items():
             if v.replace("/", "") == pair:
                 return k, float(data[1][0])
@@ -250,7 +246,7 @@ async def websocket_feed(uri, sub_msg, name, parser):
             async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
                 await ws.send(json.dumps(sub_msg))
                 provider_status[name] = "active"
-                print(f"✅ [Provider] {name} connected")
+                print(f"[Provider] {name} connected")
                 retry = 1
                 async for msg in ws:
                     if shutdown_event.is_set():
@@ -266,10 +262,10 @@ async def websocket_feed(uri, sub_msg, name, parser):
             if "451" in error_str:
                 disabled_ws.add(name)
                 provider_status[name] = "disabled (region)"
-                print(f"🚫 [Provider] {name} unavailable (HTTP 451 Region Restriction)")
+                print(f"[Provider] {name} unavailable (HTTP 451 Region Restriction)")
                 continue
             provider_status[name] = "error"
-            print(f"❌ [Provider] {name} error: {e}")
+            print(f"[Provider] {name} error: {e}")
             print(f"[Fallback] {name} unavailable, switching to next provider")
             await asyncio.sleep(retry)
             retry = min(retry * 2, 60)
@@ -327,7 +323,7 @@ async def fetch_binance_ohlc(asset):
     if not can_call(f"binance_{asset}", 30) or not check_circuit_breaker("binance"):
         return None, None
     try:
-        async with session.get("https://api.binance.com/api/v3/klines", params={"symbol": asset, "interval": "1h", "limit": "100"}) as r:
+        async with session.get("https://api.binance.com/api/v3/klines", params={"symbol": asset, "interval": "1h", "limit": 100}) as r:
             if r.status == 200:
                 raw = await r.json()
                 klines = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in raw]
@@ -584,6 +580,15 @@ def activate_pro(user_id: int, days: int = 30):
     users_db[user_id]["plan"] = "pro"
     users_db[user_id]["pro_expires"] = datetime.now() + timedelta(days=days)
 
+# ==================== CAPITAL PLAN ====================
+def get_capital_plan():
+    return {
+        "tier1": "50% (Moderate Entry)",
+        "tier2": "30% (Conservative Entry)",
+        "tier3": "20% (DCA Entry)",
+        "max_risk": "2% of capital"
+    }
+
 # ==================== CORE ANALYSIS ====================
 async def detect_regime():
     klines, _ = await get_ohlcv("BTCUSDT")
@@ -794,7 +799,6 @@ async def analyze_asset(symbol):
     confidence = max(long_score, short_score)
     confidence = max(0, min(100, confidence))
 
-    # Decision: BUY, SELL, or HOLD
     if confidence >= 60:
         decision = "BUY" if direction == "LONG" else "SELL"
     elif confidence >= 40:
@@ -818,7 +822,6 @@ async def analyze_asset(symbol):
 
     bias = direction if decision != "HOLD" else "NEUTRAL"
 
-    # Entry calculation
     if decision in ["BUY"] or (decision == "HOLD" and direction == "LONG"):
         entry_data = calculate_entries(price, atr, "LONG", decision if decision in ["BUY"] else "HOLD")
         risk = "LOW" if atr / price < 0.02 else "MEDIUM"
@@ -901,15 +904,6 @@ async def analyze_asset(symbol):
         "fear_greed": cache["fear_greed"],
         "pullback_pct": round(pullback, 2),
         "timestamp": datetime.utcnow().isoformat()
-    }
-
-# ==================== CAPITAL PLAN ====================
-def get_capital_plan():
-    return {
-        "tier1": "50% (Moderate Entry)",
-        "tier2": "30% (Conservative Entry)",
-        "tier3": "20% (DCA Entry)",
-        "max_risk": "2% of capital"
     }
 
 # ==================== PERFORMANCE ====================
@@ -1001,7 +995,7 @@ async def scan_all(force=False):
         if not force and time.time() - cache["last_scan"] < 120:
             return cache["signals"]
 
-        print(f"🔄 SCAN {datetime.utcnow()}")
+        print(f"SCAN {datetime.utcnow()}")
         await fetch_fear_greed()
         await update_performance()
         cache["market_regime"] = await detect_regime()
@@ -1038,34 +1032,34 @@ async def scan_all(force=False):
             if time.time() - last_alerted[asset] > 86400:
                 del last_alerted[asset]
 
-        print(f"✅ Scan complete. {len(results)} assets analyzed.")
+        print(f"Scan complete. {len(results)} assets analyzed.")
         return results
 
 async def scanner_loop():
-    print("🚀 Auto scanner started")
+    print("Auto scanner started")
     while not shutdown_event.is_set():
         try:
             await scan_all()
             jitter = random.randint(-15, 15)
             await asyncio.sleep(300 + jitter)
         except Exception as e:
-            print(f"❌ Scanner error: {e}")
+            print(f"Scanner error: {e}")
             await asyncio.sleep(60)
 
 # ==================== HEALTH MONITOR ====================
 async def health_monitor():
-    print("💚 Health monitor started")
+    print("Health monitor started")
     while not shutdown_event.is_set():
         try:
             if time.time() - cache["last_ws_update"] > 120:
-                print(f"⚠️ WARNING: WebSocket stale ({int(time.time() - cache['last_ws_update'])}s)")
+                print(f"WARNING: WebSocket stale ({int(time.time() - cache['last_ws_update'])}s)")
             if time.time() - cache["last_successful_scan"] > 900:
-                print(f"⚠️ WARNING: Scanner stalled ({int(time.time() - cache['last_successful_scan'])}s)")
+                print(f"WARNING: Scanner stalled ({int(time.time() - cache['last_successful_scan'])}s)")
             if telegram_queue.qsize() > 50:
-                print(f"⚠️ WARNING: Telegram queue size {telegram_queue.qsize()}")
+                print(f"WARNING: Telegram queue size {telegram_queue.qsize()}")
             await asyncio.sleep(60)
         except Exception as e:
-            print(f"❌ Health monitor error: {e}")
+            print(f"Health monitor error: {e}")
             await asyncio.sleep(60)
 
 # ==================== A2A ====================
@@ -1261,7 +1255,7 @@ async def handle_message(chat_id, text, user_id):
         last_scan = cache["last_successful_scan"]
         last_scan_str = datetime.utcfromtimestamp(last_scan).isoformat() if last_scan else "Never"
         active_ws = len([t for t in ws_tasks if not t.done()])
-        msg = f"📊 **Agent Status**\n\n"
+        msg = f"📊 Agent Status\n\n"
         msg += f"Uptime: {uptime}\n"
         msg += f"Last Scan: {last_scan_str}\n"
         msg += f"Signals Generated: {len(signal_history)}\n"
@@ -1270,11 +1264,11 @@ async def handle_message(chat_id, text, user_id):
         await send_telegram_message(chat_id, msg)
 
     elif text == "/subscribe":
-        msg = "💎 **CROO Oracle Subscription**\n\n"
+        msg = "💎 CROO Oracle Subscription\n\n"
         msg += "**Free Plan**\n- 5 requests/day\n- Basic signals\n\n"
         msg += "**Pro Plan** – $9.99/month\n- Unlimited requests\n- All assets\n- Entry zones & position sizing\n- Telegram alerts\n\n"
         msg += "**Enterprise** – Custom pricing\n- Full API access\n- White-label\n- Dedicated support\n\n"
-        msg += "🔹 **Hackathon Demo** – All features unlocked for free!\n"
+        msg += "🔹 Hackathon Demo – All features unlocked for free!\n"
         await send_telegram_message(chat_id, msg)
 
     elif text == "/usage":
@@ -1286,7 +1280,7 @@ async def handle_message(chat_id, text, user_id):
         else:
             remaining = max(0, free_limit - used)
             status = f"✅ {remaining} free requests left today"
-        msg = f"📊 **Your Usage**\n\n"
+        msg = f"📊 Your Usage\n\n"
         msg += f"Calls made: {used}\n"
         msg += f"Status: {status}\n"
         await send_telegram_message(chat_id, msg)
@@ -2072,19 +2066,19 @@ async def startup_event():
     if RENDER_EXTERNAL_URL and TELEGRAM_BOT_TOKEN and bot:
         webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
         await bot.set_webhook(url=webhook_url)
-        print(f"✅ Webhook set: {webhook_url}")
+        print(f"Webhook set: {webhook_url}")
 
     telegram_worker_task = asyncio.create_task(telegram_worker())
-    print("✅ Telegram worker started")
+    print("Telegram worker started")
 
     scanner_task = asyncio.create_task(scanner_loop())
-    print("✅ Scanner started")
+    print("Scanner started")
 
     ws_task = asyncio.create_task(start_websockets())
-    print("✅ WebSockets started")
+    print("WebSockets started")
 
     health_task = asyncio.create_task(health_monitor())
-    print("✅ Health monitor started")
+    print("Health monitor started")
 
     await scan_all(force=True)
 
@@ -2094,11 +2088,11 @@ async def startup_event():
 async def shutdown():
     global session, scanner_task, ws_task, health_task, telegram_worker_task, ws_tasks
 
-    print("🛑 Shutting down...")
+    print("Shutting down...")
     shutdown_event.set()
 
     save_memory()
-    print("✅ Memory saved")
+    print("Memory saved")
 
     tasks_to_cancel = []
     if scanner_task:
@@ -2118,13 +2112,13 @@ async def shutdown():
 
     if tasks_to_cancel:
         await asyncio.gather(*[t for t in tasks_to_cancel if t], return_exceptions=True)
-        print("✅ All tasks cancelled")
+        print("All tasks cancelled")
 
     if session:
         await session.close()
-        print("✅ Session closed")
+        print("Session closed")
 
-    print("🛑 Shutdown complete")
+    print("Shutdown complete")
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
