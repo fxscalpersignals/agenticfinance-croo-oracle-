@@ -32,12 +32,6 @@ CG_MAP = {
     "DOGEUSDT": "dogecoin", "TRXUSDT": "tron", "ADAUSDT": "cardano", "LINKUSDT": "chainlink"
 }
 
-BYBIT_MAP = {
-    "BTCUSDT": "BTCUSDT", "ETHUSDT": "ETHUSDT", "SOLUSDT": "SOLUSDT",
-    "XRPUSDT": "XRPUSDT", "BNBUSDT": "BNBUSDT", "AVAXUSDT": "AVAXUSDT",
-    "DOGEUSDT": "DOGEUSDT", "TRXUSDT": "TRXUSDT", "ADAUSDT": "ADAUSDT", "LINKUSDT": "LINKUSDT"
-}
-
 # ==================== STATE ====================
 cache = {"signals": {}, "last_scan": 0, "market_regime": "neutral", "fear_greed": 50, "live_prices": {}}
 signal_history = []
@@ -64,25 +58,57 @@ def can_call(name, cooldown=30):
         return True
     return False
 
-# ==================== BYBIT WEBSOCKET ====================
-async def bybit_websocket():
-    uri = "wss://stream.bybit.com/v5/public/linear"
-    symbols = [BYBIT_MAP[a] for a in ASSETS]
-    sub_msg = {"op": "subscribe", "args": [f"tickers.{s}" for s in symbols]}
+# ==================== WEBSOCKET FAILOVER ====================
+async def websocket_feed(uri, sub_msg, name, parser):
     while True:
         try:
             async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
                 await ws.send(json.dumps(sub_msg))
-                print("Bybit WebSocket connected")
+                print(f"{name} WebSocket connected")
                 async for msg in ws:
                     data = json.loads(msg)
-                    if "topic" in data and "tickers" in data["topic"]:
-                        ticker = data["data"]
-                        symbol = ticker["symbol"]
-                        cache["live_prices"][symbol] = float(ticker["lastPrice"])
+                    symbol, price = parser(data)
+                    if symbol and price:
+                        cache["live_prices"][symbol] = price
         except Exception as e:
-            print(f"Bybit WS error: {e}, reconnecting in 5s")
-            await asyncio.sleep(5)
+            print(f"{name} WS error: {e}, failing over")
+            return False
+    return True
+
+def parse_bybit(data):
+    if "topic" in data and "tickers" in data["topic"]:
+        ticker = data["data"]
+        return ticker["symbol"], float(ticker["lastPrice"])
+    return None, None
+
+def parse_binance(data):
+    if "s" in data and "c" in data:
+        return data["s"], float(data["c"])
+    return None, None
+
+def parse_okx(data):
+    if "arg" in data and "data" in data and len(data["data"]) > 0:
+        symbol = data["arg"]["instId"].replace("-","")
+        return symbol, float(data["data"][0]["last"])
+    return None, None
+
+def parse_kraken(data):
+    if isinstance(data, list) and len(data) > 2 and isinstance(data[1], list):
+        pair = data[-1].replace("/","")
+        return pair, float(data[1][0])
+    return None, None
+
+async def start_websockets():
+    feeds = [
+        ("wss://stream.bybit.com/v5/public/linear", {"op": "subscribe", "args": [f"tickers.{s}" for s in ASSETS]}, "Bybit", parse_bybit),
+        ("wss://stream.binance.com:9443/ws", {"method": "SUBSCRIBE", "params": [f"{s.lower()}@ticker" for s in ASSETS], "id": 1}, "Binance", parse_binance),
+        ("wss://ws.okx.com:8443/ws/v5/public", {"op": "subscribe", "args": [{"channel": "tickers", "instId": s.replace("USDT","-USDT")} for s in ASSETS]}, "OKX", parse_okx),
+        ("wss://ws.kraken.com", {"event": "subscribe", "pair": [s.replace("USDT","/USD") for s in ASSETS], "subscription": {"name": "ticker"}}, "Kraken", parse_kraken)
+    ]
+    for uri, sub_msg, name, parser in feeds:
+        if await websocket_feed(uri, sub_msg, name, parser):
+            break
+        await asyncio.sleep(2)
 
 # ==================== DATA SOURCES ====================
 async def fetch_coingecko_ohlcv(asset, days=4):
@@ -100,7 +126,7 @@ async def fetch_coingecko_ohlcv(asset, days=4):
                     ts = prices[i][0]
                     close = prices[i][1]
                     vol = volumes[i][1] if i < len(volumes) else 0
-                    klines.append([ts, close, close, close, close, vol])
+                    klines.append([ts, close, vol])
                 return klines[-100:], "CoinGecko"
     except Exception as e:
         print(f"CoinGecko ERR {asset}: {e}")
@@ -436,7 +462,7 @@ async def startup_event():
         print(f"Webhook set: {webhook_url}")
     await scan_all()
     scanner_task = asyncio.create_task(scanner_loop())
-    ws_task = asyncio.create_task(bybit_websocket())
+    ws_task = asyncio.create_task(start_websockets())
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -483,7 +509,7 @@ async def handle_message(chat_id, text, user_id):
         regime = cache["market_regime"].upper()
         top = max(signals, key=lambda x: x.get("confidence", 0)) if signals else None
 
-        msg = "🔮 CROO AI Oracle\n"
+        msg = "🔮 CROO AI Oracle\n\n"
         msg += f"Market: {regime} | F&G: {cache['fear_greed']}\n"
         msg += f"Assets: {len(ASSETS)} monitored\n"
         if top and top.get("confidence", 0) > 0:
@@ -650,28 +676,4 @@ async def explain(symbol: str):
         "grade": signal.get("grade"), "bullish_reasons": signal.get("bullish_reasons"),
         "bearish_reasons": signal.get("bearish_reasons"), "missing_conditions": signal.get("missing_conditions"),
         "market_regime": signal.get("market_regime"), "fear_greed": signal.get("fear_greed"),
-        "price": signal.get("price"), "rsi": signal.get("rsi"), "source": signal.get("source")
-    }
-
-@app.get("/agent/revenue")
-def revenue():
-    return {
-        "total_calls": agent_memory["total_calls"], "revenue_simulated": round(agent_memory["revenue_simulated"], 2)
-    }
-
-@app.get("/stats")
-async def stats():
-    await update_performance()
-    accuracy = round(performance["wins"] / performance["total"] * 100, 1) if performance["total"] > 0 else 0
-    return {
-        "accuracy": f"{accuracy}%", "total_signals": performance["total"], "wins": performance["wins"],
-        "losses": performance["losses"], "market_regime": cache["market_regime"], "fear_greed": cache["fear_greed"],
-        "best_asset": agent_memory["best_asset"], "best_asset_win_rate": f"{agent_memory['best_asset_win_rate']}%"
-    }
-
-@app.get("/reputation")
-def reputation():
-    score = min(100, performance["wins"] * 2)
-    return {"reputation_score": score, "grade": grade(score)}
-
-@app.get("/agent/memory
+        "price
