@@ -17,6 +17,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 CHAT_ID = os.environ.get("CHAT_ID")
+PAYMENTS_ENABLED = False
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 start_time = time.time()
@@ -30,6 +31,12 @@ CG_MAP = {
     "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
     "XRPUSDT": "ripple", "BNBUSDT": "binancecoin", "AVAXUSDT": "avalanche-2",
     "DOGEUSDT": "dogecoin", "TRXUSDT": "tron", "ADAUSDT": "cardano", "LINKUSDT": "chainlink"
+}
+
+KRAKEN_WS_MAP = {
+    "BTCUSDT": "XBT/USD", "ETHUSDT": "ETH/USD", "SOLUSDT": "SOL/USD",
+    "XRPUSDT": "XRP/USD", "BNBUSDT": "BNB/USD", "AVAXUSDT": "AVAX/USD",
+    "DOGEUSDT": "DOGE/USD", "TRXUSDT": "TRX/USD", "ADAUSDT": "ADA/USD", "LINKUSDT": "LINK/USD"
 }
 
 # ==================== STATE ====================
@@ -60,20 +67,18 @@ def can_call(name, cooldown=30):
 
 # ==================== WEBSOCKET FAILOVER ====================
 async def websocket_feed(uri, sub_msg, name, parser):
-    while True:
-        try:
-            async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
-                await ws.send(json.dumps(sub_msg))
-                print(f"{name} WebSocket connected")
-                async for msg in ws:
-                    data = json.loads(msg)
-                    symbol, price = parser(data)
-                    if symbol and price:
-                        cache["live_prices"][symbol] = price
-        except Exception as e:
-            print(f"{name} WS error: {e}, failing over")
-            return False
-    return True
+    try:
+        async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
+            await ws.send(json.dumps(sub_msg))
+            print(f"{name} WebSocket connected")
+            async for msg in ws:
+                data = json.loads(msg)
+                symbol, price = parser(data)
+                if symbol and price:
+                    cache["live_prices"][symbol] = price
+    except Exception as e:
+        print(f"{name} WS error: {e}")
+        raise
 
 def parse_bybit(data):
     if "topic" in data and "tickers" in data["topic"]:
@@ -94,7 +99,7 @@ def parse_okx(data):
 
 def parse_kraken(data):
     if isinstance(data, list) and len(data) > 2 and isinstance(data[1], list):
-        pair = data[-1].replace("/","")
+        pair = data[3].replace("/","")
         return pair, float(data[1][0])
     return None, None
 
@@ -103,12 +108,17 @@ async def start_websockets():
         ("wss://stream.bybit.com/v5/public/linear", {"op": "subscribe", "args": [f"tickers.{s}" for s in ASSETS]}, "Bybit", parse_bybit),
         ("wss://stream.binance.com:9443/ws", {"method": "SUBSCRIBE", "params": [f"{s.lower()}@ticker" for s in ASSETS], "id": 1}, "Binance", parse_binance),
         ("wss://ws.okx.com:8443/ws/v5/public", {"op": "subscribe", "args": [{"channel": "tickers", "instId": s.replace("USDT","-USDT")} for s in ASSETS]}, "OKX", parse_okx),
-        ("wss://ws.kraken.com", {"event": "subscribe", "pair": [s.replace("USDT","/USD") for s in ASSETS], "subscription": {"name": "ticker"}}, "Kraken", parse_kraken)
+        ("wss://ws.kraken.com", {"event": "subscribe", "pair": [KRAKEN_WS_MAP[s] for s in ASSETS if s in KRAKEN_WS_MAP], "subscription": {"name": "ticker"}}, "Kraken", parse_kraken)
     ]
-    for uri, sub_msg, name, parser in feeds:
-        if await websocket_feed(uri, sub_msg, name, parser):
-            break
-        await asyncio.sleep(2)
+    while True:
+        for uri, sub_msg, name, parser in feeds:
+            try:
+                await websocket_feed(uri, sub_msg, name, parser)
+            except Exception:
+                print(f"{name} failed, trying next feed")
+                continue
+        print("All WebSocket feeds failed, retrying in 10s")
+        await asyncio.sleep(10)
 
 # ==================== DATA SOURCES ====================
 async def fetch_coingecko_ohlcv(asset, days=4):
@@ -126,7 +136,7 @@ async def fetch_coingecko_ohlcv(asset, days=4):
                     ts = prices[i][0]
                     close = prices[i][1]
                     vol = volumes[i][1] if i < len(volumes) else 0
-                    klines.append([ts, close, vol])
+                    klines.append([ts, close, close, close, close, vol])
                 return klines[-100:], "CoinGecko"
     except Exception as e:
         print(f"CoinGecko ERR {asset}: {e}")
@@ -460,7 +470,6 @@ async def startup_event():
         webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
         await bot.set_webhook(url=webhook_url)
         print(f"Webhook set: {webhook_url}")
-    await scan_all()
     scanner_task = asyncio.create_task(scanner_loop())
     ws_task = asyncio.create_task(start_websockets())
 
@@ -489,7 +498,7 @@ async def webhook(request: Request):
 async def handle_message(chat_id, text, user_id):
     if not bot: return
     if text == "/start":
-        signals = cache["signals"].values()
+        signals = list(cache["signals"].values())
         keyboard = [
             [InlineKeyboardButton("📊 Scan Markets", callback_data="scan_all"),
              InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
@@ -507,7 +516,7 @@ async def handle_message(chat_id, text, user_id):
              InlineKeyboardButton("💎 Upgrade", callback_data="buy_cmd")]
         ]
         regime = cache["market_regime"].upper()
-        top = max(signals, key=lambda x: x.get("confidence", 0)) if signals else None
+        top = max(signals, key=lambda x: x.get("confidence", 0)) if len(signals) > 0 else None
 
         msg = "🔮 CROO AI Oracle\n\n"
         msg += f"Market: {regime} | F&G: {cache['fear_greed']}\n"
@@ -568,92 +577,8 @@ async def send_stats(chat_id):
     win_rate = round(performance["wins"] / performance["total"] * 100, 1) if performance["total"] > 0 else 0
     msg = f"📊 AGENT STATS\n\n"
     msg += f"Total Signals: {performance['total']}\n"
-    msg += f"Wins: {performance['wins']}\n"
-    msg += f"Losses: {performance['losses']}\n"
-    msg += f"Win Rate: {win_rate}%\n"
-    msg += f"Market Regime: {cache['market_regime'].upper()}\n"
-    msg += f"Fear & Greed: {cache['fear_greed']}\n"
-    msg += f"Best Asset: {agent_memory['best_asset']} ({agent_memory['best_asset_win_rate']}%)"
-    await bot.send_message(chat_id=chat_id, text=msg)
-
-async def handle_buy(chat_id, user_id):
-    if PAYMENTS_ENABLED:
-        await bot.send_message(chat_id=chat_id, text="Payments enabled post-launch.")
-    else:
-        if is_pro(user_id):
-            await bot.send_message(chat_id=chat_id, text="You're already Pro ✅")
-        else:
-            activate_pro(user_id, 999)
-            await bot.send_message(chat_id=chat_id, text="✅ Pro activated\nAll signals unlocked.")
-
-async def handle_sell(chat_id, user_id):
-    if not is_pro(user_id):
-        await bot.send_message(chat_id=chat_id, text="You're on Free plan.")
-    else:
-        users_db[user_id]["plan"] = "free"
-        users_db[user_id]["pro_expires"] = None
-        await bot.send_message(chat_id=chat_id, text="✅ Pro cancelled")
-
-async def handle_callback(chat_id, data, user_id):
-    if data == "scan_all": await send_leaderboard(chat_id)
-    elif data == "best_signal":
-        signals = [s for s in cache["signals"].values() if s.get("confidence", 0) > 0]
-        if signals: await send_rich_card(chat_id, max(signals, key=lambda x: x.get("confidence", 0)))
-        else: await bot.send_message(chat_id=chat_id, text="Scanning... try again in 10s")
-    elif data == "leaderboard": await send_leaderboard(chat_id)
-    elif data == "buy_cmd": await handle_buy(chat_id, user_id)
-    elif data == "sell_cmd": await handle_sell(chat_id, user_id)
-    elif data in ASSETS:
-        s = cache["signals"].get(data)
-        if s: await send_rich_card(chat_id, s)
-        else: await bot.send_message(chat_id=chat_id, text=f"No data for {data.replace('USDT','')}. Scanning...")
-
-# ==================== API ENDPOINTS ====================
-@app.get("/")
-def root():
-    return {"status": "CROO AI Oracle Online"}
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "uptime": int(time.time() - start_time)}
-
-@app.get("/oracle")
-async def oracle():
-    return cache["signals"]
-
-@app.get("/best_signal")
-async def best_signal():
-    signals = [s for s in cache["signals"].values() if s.get("confidence", 0) > 0]
-    if not signals: return {"asset": "NONE", "signal": "NONE", "confidence": 0}
-    best = max(signals, key=lambda x: x.get("confidence", 0))
-    return {"asset": best.get("asset"), "signal": best.get("signal"), "confidence": best.get("confidence"),
-            "grade": best.get("grade"), "entry": best.get("entry"), "price": best.get("price"), "source": best.get("source")}
-
-@app.get("/leaderboard")
-async def leaderboard():
-    signals = sorted(cache["signals"].values(), key=lambda x: x.get("confidence", 0), reverse=True)
-    return [{"asset": s.get("asset"), "confidence": s.get("confidence"), "grade": s.get("grade"),
-             "signal": s.get("signal"), "price": s.get("price"), "source": s.get("source")} for s in signals]
-
-@app.get("/performance")
-async def get_performance():
-    await update_performance()
-    win_rate = round(performance["wins"] / performance["total"] * 100, 1) if performance["total"] > 0 else 0
-    return {"total_signals": performance["total"], "wins": performance["wins"],
-            "losses": performance["losses"], "win_rate": f"{win_rate}%"}
-
-@app.post("/agent/query")
-async def agent_query(request: Request):
-    data = await request.json()
-    task = data.get("task", "")
-    if task == "find_best_pullback":
-        signals = [s for s in cache["signals"].values() if "Dip" in str(s.get("bullish_reasons", []))]
-        if not signals: return {"error": "No pullback found"}
-        best = max(signals, key=lambda x: x.get("confidence", 0))
-        return {"asset": best.get("asset"), "confidence": best.get("confidence"), "signal": best.get("signal"), "grade": best.get("grade")}
-    return await best_signal()
-
-@app.get("/history")
+    msg += f"Wins: {performance['wins
+    @app.get("/history")
 def history():
     return signal_history[-50:]
 
@@ -676,4 +601,27 @@ async def explain(symbol: str):
         "grade": signal.get("grade"), "bullish_reasons": signal.get("bullish_reasons"),
         "bearish_reasons": signal.get("bearish_reasons"), "missing_conditions": signal.get("missing_conditions"),
         "market_regime": signal.get("market_regime"), "fear_greed": signal.get("fear_greed"),
-        "price
+        "price": signal.get("price"), "entry": signal.get("entry"), "take_profit": signal.get("take_profit"),
+        "stop_loss": signal.get("stop_loss"), "source": signal.get("source"), "rsi": signal.get("rsi")
+    }
+
+@app.get("/agent/revenue")
+def revenue():
+    return {
+        "total_calls": agent_memory["total_calls"], "revenue_simulated": round(agent_memory["revenue_simulated"], 2)
+    }
+
+@app.get("/stats")
+async def stats():
+    await update_performance()
+    accuracy = round(performance["wins"] / performance["total"] * 100, 1) if performance["total"] > 0 else 0
+    return {
+        "accuracy": f"{accuracy}%", "total_signals": performance["total"], "wins": performance["wins"],
+        "losses": performance["losses"], "market_regime": cache["market_regime"], "fear_greed": cache["fear_greed"],
+        "best_asset": agent_memory["best_asset"], "best_asset_win_rate": f"{agent_memory['best_asset_win_rate']}%"
+    }
+
+@app.get("/reputation")
+def reputation():
+    score = min(100, performance["wins"] * 2)
+    return {"reputation_score": score, "grade": grade(score)}
