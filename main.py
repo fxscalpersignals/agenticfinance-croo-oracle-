@@ -23,20 +23,20 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 start_time = time.time()
 
 ASSETS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "CROUSDT",
-    "LINKUSDT", "AVAXUSDT", "SUIUSDT", "ATOMUSDT", "BNBUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
+    "AVAXUSDT", "DOGEUSDT", "TRXUSDT", "ADAUSDT", "TONUSDT"
 ]
 
 CG_MAP = {
     "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
-    "XRPUSDT": "ripple", "CROUSDT": "crypto-com-chain", "LINKUSDT": "chainlink",
-    "AVAXUSDT": "avalanche-2", "SUIUSDT": "sui", "ATOMUSDT": "cosmos", "BNBUSDT": "binancecoin"
+    "XRPUSDT": "ripple", "BNBUSDT": "binancecoin", "AVAXUSDT": "avalanche-2",
+    "DOGEUSDT": "dogecoin", "TRXUSDT": "tron", "ADAUSDT": "cardano", "TONUSDT": "the-open-network"
 }
 
 KRAKEN_MAP = {
     "BTCUSDT": "XBTUSD", "ETHUSDT": "ETHUSD", "SOLUSDT": "SOLUSD",
-    "XRPUSDT": "XRPUSD", "LINKUSDT": "LINKUSD", "AVAXUSDT": "AVAXUSD",
-    "ATOMUSDT": "ATOMUSD", "BNBUSDT": "BNBUSD", "CROUSDT": None, "SUIUSDT": None
+    "XRPUSDT": "XRPUSD", "BNBUSDT": "BNBUSD", "AVAXUSDT": "AVAXUSD",
+    "DOGEUSDT": "DOGEUSD", "TRXUSDT": "TRXUSD", "ADAUSDT": "ADAUSD", "TONUSDT": None
 }
 
 # ==================== STATE ====================
@@ -89,8 +89,8 @@ def fetch_kraken_ohlc(asset):
 
 def fetch_coinbase_candles(asset):
     cb_map = {"BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD", "SOLUSDT": "SOL-USD",
-              "XRPUSDT": "XRP-USD", "LINKUSDT": "LINK-USD", "AVAXUSDT": "AVAX-USD",
-              "ATOMUSDT": "ATOM-USD", "BNBUSDT": "BNB-USD"}
+              "XRPUSDT": "XRP-USD", "BNBUSDT": "BNB-USD", "AVAXUSDT": "AVAX-USD",
+              "DOGEUSDT": "DOGE-USD", "TRXUSDT": "TRX-USD", "ADAUSDT": "ADA-USD"}
     try:
         product = cb_map.get(asset)
         if not product: return None, None
@@ -151,16 +151,22 @@ def calc_rsi(closes, period=14):
         rsi[i] = 100. - 100. / (1. + rs)
     return rsi
 
-def calc_ema(closes, period):
-    if len(closes) < period: return np.array([closes[-1]] if len(closes) > 0 else [0])
-    return np.convolve(closes, np.ones(period)/period, mode='valid')
+def calc_ema(prices, period):
+    """REAL EMA - not SMA"""
+    if len(prices) < period: return np.array([prices[-1]] if len(prices) > 0 else [0])
+    alpha = 2 / (period + 1)
+    ema = [prices[0]]
+    for price in prices[1:]:
+        ema.append(alpha * price + (1 - alpha) * ema[-1])
+    return np.array(ema)
 
 def grade(confidence):
     if confidence >= 90: return "A+"
     elif confidence >= 80: return "A"
     elif confidence >= 70: return "B"
     elif confidence >= 60: return "C"
-    return "D"
+    elif confidence >= 50: return "D"
+    return "F"
 
 # ==================== USER MANAGEMENT ====================
 def is_pro(user_id: int) -> bool:
@@ -190,19 +196,20 @@ def analyze_asset(symbol):
         if price > 0:
             return {
                 "asset": symbol.replace("USDT", ""), "signal": "WATCH", "confidence": 20,
-                "grade": "D", "price": round(price, 4), "entry": 0, "stop_loss": 0, "take_profit": 0,
-                "bullish_reasons": ["Price only"], "missing_conditions": ["Full OHLCV data unavailable"],
-                "source": "price_only", "direction": "NONE"
+                "grade": "F", "price": round(price, 4), "entry": round(price, 4),
+                "stop_loss": round(price * 0.97, 4), "take_profit": round(price * 1.05, 4),
+                "bullish_reasons": ["Price only"], "bearish_reasons": [],
+                "missing_conditions": ["Full OHLCV data unavailable"], "source": "price_only", "direction": "NONE"
             }
-        return {"asset": symbol.replace("USDT", ""), "signal": "NONE", "confidence": 0, "price": 0, "bullish_reasons": ["No Data"], "direction": "NONE"}
+        return {"asset": symbol.replace("USDT", ""), "signal": "NONE", "confidence": 0, "price": 0, "bullish_reasons": ["No Data"], "bearish_reasons": [], "direction": "NONE"}
 
     closes = np.array([float(k[4]) for k in klines])
     volumes = np.array([float(k[5]) for k in klines])
     price = closes[-1]
     prev_close = closes[-2] if len(closes) > 1 else price
     rsi_val = calc_rsi(closes)[-1]
-    ema20 = calc_ema(closes, 20)[-1] if len(calc_ema(closes, 20)) > 0 else price
-    ema50 = calc_ema(closes, 50)[-1] if len(calc_ema(closes, 50)) > 0 else price
+    ema20 = calc_ema(closes, 20)[-1]
+    ema50 = calc_ema(closes, 50)[-1]
 
     recent_high = max(closes[-20:])
     recent_low = min(closes[-20:])
@@ -217,6 +224,7 @@ def analyze_asset(symbol):
     long_score = 0
     short_score = 0
     bullish_reasons = []
+    bearish_reasons = []
     missing_conditions = []
 
     # 1. RSI: 20 pts
@@ -225,6 +233,7 @@ def analyze_asset(symbol):
         bullish_reasons.append("RSI Oversold")
     elif rsi_val > 55:
         short_score += 20
+        bearish_reasons.append("RSI Overbought")
     else:
         missing_conditions.append("RSI neutral")
 
@@ -234,25 +243,28 @@ def analyze_asset(symbol):
         bullish_reasons.append("Above EMA50")
     elif price < ema50:
         short_score += 20
+        bearish_reasons.append("Below EMA50")
     else:
         missing_conditions.append("No clear EMA trend")
 
-    # 3. Pullback + Support: 20 pts - STRICT 4-12%
-    if 4 < pullback < 12 and price_near_ema20:
+    # 3. Pullback + Support: 20 pts - FIXED LOGIC
+    if price > ema50 and 4 < pullback < 12 and price_near_ema20:
         long_score += 20
         bullish_reasons.append(f"Meaningful Dip {pullback:.1f}% to EMA20")
-    elif 4 < bounce < 12 and price_near_ema20:
+    elif price < ema50 and 4 < bounce < 12 and price_near_ema20:
         short_score += 20
+        bearish_reasons.append(f"Dead Cat Bounce {bounce:.1f}% to EMA20")
     else:
         missing_conditions.append("Pullback too shallow/deep or not at EMA20")
 
     # 4. Volume Spike: 20 pts
     if vol_spike:
-        if long_score > short_score:
+        if long_score >= short_score:
             long_score += 20
             bullish_reasons.append("Volume Spike")
         else:
             short_score += 20
+            bearish_reasons.append("Volume Spike")
     else:
         missing_conditions.append("No volume confirmation")
 
@@ -262,26 +274,28 @@ def analyze_asset(symbol):
         bullish_reasons.append("Bullish Confirmation Candle")
     elif bearish_confirmation:
         short_score += 20
+        bearish_reasons.append("Bearish Confirmation Candle")
     else:
-        missing_conditions.append("No bullish candle close")
+        missing_conditions.append("No confirmation candle")
 
     # Fear & Greed bonus
     fg = cache["fear_greed"]
-    if fg < 25 and long_score > short_score:
+    if fg < 25 and long_score >= short_score:
         long_score += 5
         bullish_reasons.append("Extreme Fear")
     if fg > 75 and short_score > long_score:
         short_score += 5
+        bearish_reasons.append("Extreme Greed")
 
     direction = "LONG" if long_score >= short_score else "SHORT"
     confidence = max(long_score, short_score)
 
-    # STRICT THRESHOLDS: BUY >= 80, WATCH 60-79, NONE < 60
+    # NEW THRESHOLDS: BUY/SHORT >= 70, WATCH >= 50
     signal = "NONE"
-    if confidence >= 80: signal = "BUY" if direction == "LONG" else "SHORT"
-    elif confidence >= 60: signal = "WATCH"
+    if confidence >= 70: signal = "BUY" if direction == "LONG" else "SHORT"
+    elif confidence >= 50: signal = "WATCH"
 
-    # FIX: WATCH shows 0 for entry/SL/TP
+    # WATCH shows actionable levels
     if signal == "BUY":
         stop_loss = round(price * 0.95, 4)
         take_profit = round(price * 1.10, 4)
@@ -290,21 +304,30 @@ def analyze_asset(symbol):
         stop_loss = round(price * 1.05, 4)
         take_profit = round(price * 0.90, 4)
         entry = round(price, 4)
+    elif signal == "WATCH":
+        entry = round(price, 4)
+        if direction == "LONG":
+            stop_loss = round(price * 0.97, 4)
+            take_profit = round(price * 1.05, 4)
+        else:
+            stop_loss = round(price * 1.03, 4)
+            take_profit = round(price * 0.95, 4)
     else:
         stop_loss = 0
         take_profit = 0
         entry = 0
 
     if not bullish_reasons: bullish_reasons = ["Waiting for setup"]
+    if not bearish_reasons: bearish_reasons = ["Waiting for setup"]
 
     return {
         "asset": symbol.replace("USDT", ""), "price": round(price, 4), "signal": signal,
         "confidence": confidence, "grade": grade(confidence), "direction": direction,
         "entry": entry, "stop_loss": stop_loss, "take_profit": take_profit,
         "rsi": round(rsi_val, 1), "bullish_reasons": bullish_reasons,
-        "missing_conditions": missing_conditions, "source": source,
-        "market_regime": cache["market_regime"], "fear_greed": cache["fear_greed"],
-        "timestamp": datetime.utcnow().isoformat()
+        "bearish_reasons": bearish_reasons, "missing_conditions": missing_conditions,
+        "source": source, "market_regime": cache["market_regime"],
+        "fear_greed": cache["fear_greed"], "timestamp": datetime.utcnow().isoformat()
     }
 
 def update_performance():
@@ -348,12 +371,12 @@ def update_memory():
     agent_memory["best_asset_win_rate"] = round(best_rate * 100, 1)
 
 async def send_alert(signal):
-    if not bot or signal["confidence"] < 80: return
+    if not bot or signal["confidence"] < 70: return
     if signal["asset"] in last_alerted and time.time() - last_alerted[signal["asset"]] < 3600: return
     msg = f"🚨 NEW {signal['signal']} SIGNAL\n\n"
     msg += f"Asset: {signal['asset']}\nConfidence: {signal['confidence']}% ({signal['grade']})\n\n"
     msg += f"Entry:\n{signal['entry']}\n\nTarget:\n{signal['take_profit']}\n\n"
-    msg += f"Stop:\n{signal['stop_loss']}\n\nReasons:\n" + "\n".join([f"✅ {r}" for r in signal['bullish_reasons']])
+    msg += f"Stop:\n{signal['stop_loss']}\n\nReasons:\n" + "\n".join([f"✅ {r}" for r in signal['bullish_reasons'] if signal['direction']=='LONG' else [f"✅ {r}" for r in signal['bearish_reasons']]])
     msg += f"\n\nMarket: {signal['market_regime'].upper()} | F&G: {signal['fear_greed']} | Source: {signal['source']}"
     if CHAT_ID:
         try: await bot.send_message(chat_id=CHAT_ID, text=msg)
@@ -361,7 +384,7 @@ async def send_alert(signal):
     last_alerted[signal["asset"]] = time.time()
 
 def scan_all():
-    print("Starting scan...")
+    print(f"AUTO SCAN {datetime.utcnow()}")
     fetch_fear_greed()
     update_performance()
     cache["market_regime"] = detect_regime()
@@ -429,12 +452,12 @@ async def handle_message(chat_id, text, user_id):
              InlineKeyboardButton("📈 ETH", callback_data="ETHUSDT"),
              InlineKeyboardButton("📈 SOL", callback_data="SOLUSDT")],
             [InlineKeyboardButton("📈 BNB", callback_data="BNBUSDT"),
-             InlineKeyboardButton("📈 LINK", callback_data="LINKUSDT")],
-            [InlineKeyboardButton("📈 XRP", callback_data="XRPUSDT"),
-             InlineKeyboardButton("📈 AVAX", callback_data="AVAXUSDT")],
-            [InlineKeyboardButton("📈 SUI", callback_data="SUIUSDT"),
-             InlineKeyboardButton("📈 ATOM", callback_data="ATOMUSDT")],
-            [InlineKeyboardButton("📈 CRO", callback_data="CROUSDT"),
+             InlineKeyboardButton("📈 XRP", callback_data="XRPUSDT")],
+            [InlineKeyboardButton("📈 AVAX", callback_data="AVAXUSDT"),
+             InlineKeyboardButton("📈 DOGE", callback_data="DOGEUSDT")],
+            [InlineKeyboardButton("📈 TRX", callback_data="TRXUSDT"),
+             InlineKeyboardButton("📈 ADA", callback_data="ADAUSDT")],
+            [InlineKeyboardButton("📈 TON", callback_data="TONUSDT"),
              InlineKeyboardButton("💎 Upgrade", callback_data="buy_cmd")]
         ]
         regime = cache["market_regime"].upper()
@@ -467,16 +490,20 @@ async def send_rich_card(chat_id, s):
     if s.get('signal') == "WATCH":
         msg = f"⚠️ WATCH SIGNAL\n\n"
         msg += f"Asset: {s.get('asset')}\nConfidence: {s.get('confidence')}% ({s.get('grade')})\nPrice: ${s.get('price')}\n\n"
-        msg += f"Entry Zone: Wait\nTarget: Pending\nStop: Pending\n\n"
+        msg += f"Entry Zone: ${s.get('entry')}\nTarget: ${s.get('take_profit')}\nStop: ${s.get('stop_loss')}\n\n"
     else:
         msg = f"🚨 {s.get('signal')} SIGNAL\n\n"
         msg += f"Asset: {s.get('asset')}\nConfidence: {s.get('confidence')}% ({s.get('grade')})\nPrice: ${s.get('price')}\n\n"
-        msg += f"Entry:\n{s.get('entry')}\n\nTarget:\n{s.get('take_profit')}\n\nStop:\n{s.get('stop_loss')}\n\n"
+        msg += f"Entry:\n${s.get('entry')}\n\nTarget:\n${s.get('take_profit')}\n\nStop:\n${s.get('stop_loss')}\n\n"
 
-    msg += f"Bullish Reasons:\n" + "\n".join([f"✅ {r}" for r in s.get('bullish_reasons', ['None'])])
+    if s.get('direction') == 'LONG':
+        msg += f"Bullish Reasons:\n" + "\n".join([f"✅ {r}" for r in s.get('bullish_reasons', ['None'])])
+    else:
+        msg += f"Bearish Reasons:\n" + "\n".join([f"✅ {r}" for r in s.get('bearish_reasons', ['None'])])
+
     if s.get('missing_conditions'):
         msg += f"\n\nMissing Conditions:\n" + "\n".join([f"❌ {m}" for m in s.get('missing_conditions')])
-    msg += f"\n\nNeed 80% for BUY\nCurrent: {s.get('confidence')}%"
+    msg += f"\n\nNeed 70% for BUY/SHORT\nCurrent: {s.get('confidence')}%"
     msg += f"\nMarket: {s.get('market_regime','').upper()} | F&G: {s.get('fear_greed')} | Source: {s.get('source', 'N/A')}"
     await bot.send_message(chat_id=chat_id, text=msg)
 
@@ -608,9 +635,9 @@ def explain(symbol: str):
     return {
         "asset": signal.get("asset"), "signal": signal.get("signal"), "confidence": signal.get("confidence"),
         "grade": signal.get("grade"), "bullish_reasons": signal.get("bullish_reasons"),
-        "missing_conditions": signal.get("missing_conditions"), "market_regime": signal.get("market_regime"),
-        "fear_greed": signal.get("fear_greed"), "price": signal.get("price"), "rsi": signal.get("rsi"),
-        "source": signal.get("source")
+        "bearish_reasons": signal.get("bearish_reasons"), "missing_conditions": signal.get("missing_conditions"),
+        "market_regime": signal.get("market_regime"), "fear_greed": signal.get("fear_greed"),
+        "price": signal.get("price"), "rsi": signal.get("rsi"), "source": signal.get("source")
     }
 
 @app.get("/agent/revenue")
@@ -648,15 +675,4 @@ def demo():
     return {
         "best_signal": best.get("asset"), "confidence": best.get("confidence"), "grade": best.get("grade"),
         "entry": best.get("entry"), "tp": best.get("take_profit"), "sl": best.get("stop_loss"),
-        "market_regime": best.get("market_regime"), "fear_greed": best.get("fear_greed"),
-        "signal": best.get("signal"), "source": best.get("source")
-    }
-
-@app.get("/cap/metadata")
-def cap_metadata():
-    return {"agent": "CROO AI Oracle", "version": "10.1", "category": "Market Intelligence",
-            "callable": True, "supports": ["BTC", "ETH", "SOL", "XRP", "CRO", "LINK", "AVAX", "SUI", "ATOM", "BNB"]}
-
-@app.get("/pricing")
-def pricing():
-    return {"free": "5 requests/day", "pro": "Unlimited", "enterprise
+        "market_regime": best.get("market
