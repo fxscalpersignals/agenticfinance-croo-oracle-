@@ -66,7 +66,8 @@ def fetch_coingecko_ohlcv(asset, days=4):
                 ts = prices[i][0]
                 close = prices[i][1]
                 vol = volumes[i][1] if i < len(volumes) else 0
-                klines.append([ts, close, vol])
+                # Standardized: [ts, open, high, low, close, volume]
+                klines.append([ts, close, close, close, close, vol])
             return klines[-100:], "CoinGecko"
     except Exception as e:
         print(f"CoinGecko ERR {asset}: {e}")
@@ -82,7 +83,12 @@ def fetch_kraken_ohlc(asset):
             data = r.json()
             if "error" in data and data["error"]: return None, None
             result_key = list(data["result"].keys())[0]
-            return data["result"][result_key][-100:], "Kraken"
+            raw = data["result"][result_key][-100:]
+            # Kraken: [time, open, high, low, close, vwap, volume, count]
+            klines = []
+            for r in raw:
+                klines.append([int(r[0])*1000, float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[6])])
+            return klines, "Kraken"
     except Exception as e:
         print(f"Kraken ERR {asset}: {e}")
     return None, None
@@ -97,9 +103,13 @@ def fetch_coinbase_candles(asset):
         url = f"https://api.exchange.coinbase.com/products/{product}/candles"
         r = requests.get(url, params={"granularity": 3600}, timeout=10)
         if r.status_code == 200:
-            klines = r.json()
-            klines.reverse()
-            return klines[-100:], "Coinbase"
+            raw = r.json()
+            raw.reverse()
+            # Coinbase: [time, low, high, open, close, volume] -> standardize
+            klines = []
+            for r in raw[-100:]:
+                klines.append([r[0]*1000, r[3], r[2], r[1], r[4], r[5]])
+            return klines, "Coinbase"
     except Exception as e:
         print(f"Coinbase ERR {asset}: {e}")
     return None, None
@@ -184,7 +194,8 @@ def activate_pro(user_id: int, days: int = 30):
 def detect_regime():
     klines, _ = get_ohlcv("BTCUSDT")
     if not klines or len(klines) < 50: return "neutral"
-    closes = np.array([float(k[4]) for k in klines])
+    closes = np.array([float(k[4]) for k in klines if len(k) > 4])
+    if len(closes) < 50: return "neutral"
     ema50 = calc_ema(closes, 50)[-1]
     return "bullish" if closes[-1] > ema50 else "bearish"
 
@@ -202,8 +213,10 @@ def analyze_asset(symbol):
             }
         return {"asset": symbol.replace("USDT", ""), "signal": "NONE", "confidence": 0, "price": 0, "bullish_reasons": ["No Data"], "bearish_reasons": [], "direction": "NONE"}
 
-    closes = np.array([float(k[4]) for k in klines])
-    volumes = np.array([float(k[5]) for k in klines])
+    closes = np.array([float(k[4]) for k in klines if len(k) > 4])
+    volumes = np.array([float(k[5]) for k in klines if len(k) > 5])
+    if len(closes) == 0: return {"asset": symbol.replace("USDT", ""), "signal": "NONE", "confidence": 0, "price": 0, "bullish_reasons": ["No Data"], "bearish_reasons": [], "direction": "NONE"}
+
     price = closes[-1]
     prev_close = closes[-2] if len(closes) > 1 else price
     rsi_val = calc_rsi(closes)[-1]
@@ -214,8 +227,8 @@ def analyze_asset(symbol):
     recent_low = min(closes[-20:])
     pullback = (recent_high - price) / recent_high * 100 if recent_high > 0 else 0
     bounce = (price - recent_low) / recent_low * 100 if recent_low > 0 else 0
-    avg_vol = np.mean(volumes[-20:])
-    vol_spike = volumes[-1] > avg_vol * 1.5 if avg_vol > 0 else False
+    avg_vol = np.mean(volumes[-20:]) if len(volumes) >= 20 else 0
+    vol_spike = volumes[-1] > avg_vol * 1.5 if avg_vol > 0 and len(volumes) > 0 else False
     price_near_ema20 = abs(price - ema20) / ema20 * 100 < 1.5
     bullish_confirmation = price > prev_close
     bearish_confirmation = price < prev_close
@@ -643,14 +656,4 @@ def stats():
     return {
         "accuracy": f"{accuracy}%", "total_signals": performance["total"], "wins": performance["wins"],
         "losses": performance["losses"], "market_regime": cache["market_regime"], "fear_greed": cache["fear_greed"],
-        "best_asset": agent_memory["best_asset"], "best_asset_win_rate": f"{agent_memory['best_asset_win_rate']}%"
-    }
-
-@app.get("/reputation")
-def reputation():
-    score = min(100, performance["wins"] * 2)
-    return {"reputation_score": score, "grade": grade(score)}
-
-@app.get("/agent/memory")
-def get_memory():
-    return agent_memory
+        "best_asset": agent_memory["best
