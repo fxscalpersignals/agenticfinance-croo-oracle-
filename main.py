@@ -174,7 +174,7 @@ def mark_success(name):
         api_failures[name] = (0, time.time() + 600)
     provider_status[name] = "active"
 
-# ==================== TELEGRAM QUEUE (FIXED - NO HTML) ====================
+# ==================== TELEGRAM QUEUE (NO HTML) ====================
 async def telegram_worker():
     while not shutdown_event.is_set():
         try:
@@ -193,7 +193,6 @@ async def telegram_worker():
             await asyncio.sleep(1)
 
 async def send_telegram_message(chat_id, text, reply_markup=None):
-    """Send plain text message (no HTML parsing)"""
     await telegram_queue.put({
         "chat_id": chat_id,
         "text": text,
@@ -1062,43 +1061,67 @@ async def health_monitor():
             print(f"Health monitor error: {e}")
             await asyncio.sleep(60)
 
-# ==================== A2A ====================
+# ==================== A2A ENHANCED ====================
 @app.post("/a2a")
 async def a2a(request: Request):
     try:
         data = await request.json()
     except:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
     agent = data.get("agent", "Unknown")
     request_type = data.get("request", "")
 
+    job_id = f"job_{int(time.time())}_{random.randint(1000, 9999)}"
+
     if request_type == "best_trade":
+        # Ensure fresh data
+        if time.time() - cache["last_scan"] > 300:
+            await scan_all()
         signals = [s for s in cache["signals"].values() if s.get("confidence", 0) > 0]
         if not signals:
-            return JSONResponse({"response": {"message": "No signals available"}})
+            return JSONResponse({
+                "job_id": job_id,
+                "status": "no_signal",
+                "message": "No signals available",
+                "from_agent": "CROO Oracle",
+                "to_agent": agent
+            })
         best = max(signals, key=lambda x: x.get("confidence", 0))
+        # Track revenue
+        agent_memory["total_calls"] += 1
+        agent_memory["revenue_simulated"] += 0.01
+        save_memory()
         return JSONResponse({
-            "response": {
+            "job_id": job_id,
+            "status": "completed",
+            "cost": "0.01 USDC",
+            "result": {
                 "asset": best.get("asset"),
                 "decision": best.get("decision"),
-                "bias": best.get("bias"),
                 "confidence": best.get("confidence"),
                 "entry_zone": best.get("entry_zone"),
                 "entry": best.get("entry"),
                 "tp": best.get("take_profit"),
                 "sl": best.get("stop_loss"),
                 "risk_reward": best.get("risk_reward"),
-                "risk": best.get("risk"),
-                "holding_period": best.get("holding_period"),
-                "action": best.get("action"),
                 "reasoning": best.get("reasoning", [])
             },
             "from_agent": "CROO Oracle",
             "to_agent": agent
         })
+
     elif request_type == "market_intel":
+        if time.time() - cache["last_scan"] > 300:
+            await scan_all()
+        agent_memory["total_calls"] += 1
+        agent_memory["revenue_simulated"] += 0.005
+        save_memory()
         return JSONResponse({
-            "response": {
+            "job_id": job_id,
+            "status": "completed",
+            "cost": "0.005 USDC",
+            "result": {
                 "market_regime": cache["market_regime"],
                 "fear_greed": cache["fear_greed"],
                 "signals": len([s for s in cache["signals"].values() if s.get("decision") in ["BUY", "SELL"]]),
@@ -1107,7 +1130,14 @@ async def a2a(request: Request):
             "from_agent": "CROO Oracle",
             "to_agent": agent
         })
-    return JSONResponse({"error": f"Unknown request: {request_type}"})
+
+    return JSONResponse({
+        "job_id": job_id,
+        "status": "error",
+        "message": f"Unknown request: {request_type}",
+        "from_agent": "CROO Oracle",
+        "to_agent": agent
+    }, status_code=400)
 
 # ==================== TELEGRAM COMMANDS ====================
 async def send_rich_card(chat_id, s, back_button=True):
@@ -1979,6 +2009,11 @@ def agent_manifest():
         "description": "Autonomous crypto intelligence agent with pullback detection, market regime analysis, entry zone recommendations, realistic TP/SL, volatility filtering, explainable AI, reasoning engine, and capital allocation plan.",
         "endpoint": "/agent/query",
         "a2a_endpoint": "/a2a",
+        "pricing": {
+            "free": "5 requests/day",
+            "pro": "$9.99/month",
+            "enterprise": "Custom"
+        },
         "entry_strategy": {
             "type": "Zone-based entries",
             "description": "Never enters at current price. Uses 0.5-1% below/above current price with multiple levels",
@@ -2039,7 +2074,8 @@ def print_startup_banner():
         "✓ Risk Management",
         "✓ Capital Allocation",
         "✓ Agent Memory",
-        "✓ Telegram Delivery"
+        "✓ Telegram Delivery",
+        "✓ A2A Ready"
     ]
     for cap in caps:
         print(f"  {cap}")
